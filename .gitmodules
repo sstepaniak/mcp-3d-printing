@@ -1,0 +1,3 @@
+[submodule "prusa/profiles"]
+	path = prusa/profiles
+	url = https://github.com/sstepaniak/prusa-profiles.git
