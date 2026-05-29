@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import re
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -114,6 +115,275 @@ _THRESHOLDS: list[tuple[str, object, str]] = [
     ("infill_speed",             lambda v: float(v) > 150,
      "Infill speed >150 mm/s — verify printer motion system can keep up"),
 ]
+
+
+# ─── tune_profile data ────────────────────────────────────────────────────────
+
+@dataclass
+class TuneResult:
+    proposed_changes: dict[str, str]
+    explanations: dict[str, str]
+    new_profile_ini_content: str
+    suggested_profile_name: str
+
+
+# Known-good fallback values for settings that live in the printer or filament
+# profile and therefore may be absent from a pure print profile.  These let
+# fix_stringing / fix_under_extrusion etc. still emit useful changes even when
+# called on a print-only base profile.
+_SETTING_DEFAULTS: dict[str, str] = {
+    "retract_before_travel":            "2",
+    "retract_length":                   "0.8",
+    "retract_speed":                    "40",
+    "extrusion_multiplier":             "1.0",
+    "max_fan_speed":                    "100",
+    "first_layer_bed_temperature":      "55",
+    "support_material_interface_layers": "3",
+}
+
+
+# Each entry in _TUNE_RULES:
+#   setting -> (value_fn, explanation)
+# value_fn(current: str | None) -> str | None
+#   Return None to skip this setting (e.g. when it's absent and no default applies).
+_TUNE_RULES: dict[str, dict[str, tuple]] = {
+
+    "faster": {
+        "layer_height": (
+            lambda v: f"{min(float(v) * 1.5, 0.3):.2f}" if v else None,
+            "Increased 50% to print fewer total layers; capped at 0.3 mm to maintain acceptable quality.",
+        ),
+        "perimeters": (
+            lambda v: str(max(int(v) - 1, 1)) if v else None,
+            "One fewer wall cuts perimeter print time; minimum of 1 is kept for structural integrity.",
+        ),
+        "fill_density": (
+            lambda v: f"{max(int(v.rstrip('%')) - 5, 5)}%" if v else None,
+            "Reduced 5 pp to trim infill time; slight reduction in compressive strength is the trade-off.",
+        ),
+        "infill_speed": (
+            lambda v: str(min(int(float(v)) + 30, 200)) if v else None,
+            "Faster infill has the least quality impact of any speed change; capped at 200 mm/s.",
+        ),
+        "top_solid_layers": (
+            lambda v: str(max(int(v) - 1, 2)) if v else None,
+            "One fewer top layer reduces finishing time; 2 layers minimum prevents infill show-through.",
+        ),
+    },
+
+    "stronger": {
+        "fill_density": (
+            lambda v: f"{min(int(v.rstrip('%')) + 10, 60)}%" if v else None,
+            "Increased 10 pp for greater structural strength and load resistance.",
+        ),
+        "perimeters": (
+            lambda v: str(min(int(v) + 1, 6)) if v else None,
+            "Extra perimeter wall significantly improves compressive strength and impact resistance.",
+        ),
+        "fill_pattern": (
+            lambda v: "gyroid",
+            "Gyroid infill is isotropic — equal strength in all load directions vs rectilinear.",
+        ),
+        "bottom_solid_layers": (
+            lambda v: str(min(int(v) + 1, 8)) if v else None,
+            "Extra bottom layer improves bed adhesion and base structural rigidity.",
+        ),
+        "top_solid_layers": (
+            lambda v: str(min(int(v) + 1, 8)) if v else None,
+            "Extra top solid layer fully caps the infill for a more solid top surface.",
+        ),
+    },
+
+    "better_surface_quality": {
+        "layer_height": (
+            lambda v: f"{max(float(v) * 0.6, 0.05):.2f}" if v else None,
+            "Reduced 40% for noticeably finer layer lines and a smoother visible surface.",
+        ),
+        "perimeters": (
+            lambda v: str(min(int(v) + 1, 5)) if v else None,
+            "Extra perimeter widens the shell, reducing infill pattern show-through on outer walls.",
+        ),
+        "ironing": (
+            lambda v: "1",
+            "Ironing re-traces the top surface at low flow to flatten and smooth it.",
+        ),
+        "external_perimeter_speed": (
+            lambda v: str(max(int(float(v)) - 10, 15)) if v else None,
+            "Slower outer wall gives the filament time to settle and bond cleanly to the previous layer.",
+        ),
+        "top_solid_layers": (
+            lambda v: str(min(int(v) + 2, 8)) if v else None,
+            "Extra top layers fully bury the infill pattern beneath the visible surface.",
+        ),
+    },
+
+    "fix_stringing": {
+        "retract_before_travel": (
+            lambda v: "0.5",
+            "Retract before any travel >0.5 mm; larger values skip short moves and allow ooze.",
+        ),
+        "retract_length": (
+            lambda v: f"{min(float(v) + 0.5, 2.0):.1f}" if v else None,
+            "Longer retraction pulls melt further back into the nozzle, reducing ooze during travel.",
+        ),
+        "retract_speed": (
+            lambda v: str(min(int(float(v)) + 10, 70)) if v else None,
+            "Faster retraction reduces the window where molten filament can ooze during pull-back.",
+        ),
+        "travel_speed": (
+            lambda v: str(min(int(float(v)) + 30, 250)) if v else None,
+            "Faster travel shortens the time between retract and unretract, limiting ooze distance.",
+        ),
+    },
+
+    "fix_warping": {
+        "brim_type": (
+            lambda v: "outer_only",
+            "An outer brim anchors base perimeters against corner lift during cooling.",
+        ),
+        "brim_width": (
+            lambda v: f"{max(float(v), 8.0):.1f}" if v else "8.0",
+            "8 mm brim provides sufficient contact area to hold corners down against thermal contraction.",
+        ),
+        "first_layer_speed": (
+            lambda v: str(min(int(float(v)), 20)) if v else None,
+            "Capping first layer speed at 20 mm/s maximises adhesion contact time with the bed.",
+        ),
+        "elefant_foot_compensation": (
+            lambda v: v if float(v or 0) > 0 else "0.1",
+            "Small compensation prevents the brim from fusing into the part perimeter under squish.",
+        ),
+    },
+
+    "fix_layer_separation": {
+        "layer_height": (
+            lambda v: f"{max(float(v) * 0.8, 0.05):.2f}" if v else None,
+            "Thinner layers increase the surface-area ratio and bonding contact between adjacent layers.",
+        ),
+        "perimeter_speed": (
+            lambda v: str(max(int(float(v)) - 15, 20)) if v else None,
+            "Slower perimeter speed gives each layer more dwell time to bond to the one below.",
+        ),
+        "external_perimeter_speed": (
+            lambda v: str(max(int(float(v)) - 10, 15)) if v else None,
+            "Slowing the outer wall reduces cooling speed and improves inter-layer fusion on the surface.",
+        ),
+    },
+
+    "fix_elephant_foot": {
+        "elefant_foot_compensation": (
+            lambda v: f"{max(float(v) + 0.15, 0.2):.2f}" if v else "0.2",
+            "Shrinks the first layer perimeter inward to counteract outward squish spread.",
+        ),
+        "first_layer_height": (
+            lambda v: f"{max(float(v) - 0.05, 0.1):.2f}" if v else None,
+            "Reducing first layer height lessens the over-squish that causes base flaring.",
+        ),
+        "first_layer_speed": (
+            lambda v: str(max(int(float(v)) - 5, 10)) if v else None,
+            "Slower first layer reduces the lateral nozzle pressure that pushes filament outward.",
+        ),
+    },
+
+    "fix_under_extrusion": {
+        "extrusion_multiplier": (
+            lambda v: f"{min(float(v) + 0.05, 1.2):.2f}" if v else None,
+            "Flow multiplier compensates directly for under-extrusion; increase in 0.05 steps.",
+        ),
+        "perimeter_speed": (
+            lambda v: str(max(int(float(v)) - 20, 20)) if v else None,
+            "Slower speed gives the extruder motor more time to push the required melt volume.",
+        ),
+        "infill_speed": (
+            lambda v: str(max(int(float(v)) - 30, 30)) if v else None,
+            "Reducing infill speed stops the hotend running faster than it can melt filament.",
+        ),
+    },
+
+    "fix_over_extrusion": {
+        "extrusion_multiplier": (
+            lambda v: f"{max(float(v) - 0.05, 0.8):.2f}" if v else None,
+            "Reducing flow multiplier by 0.05 corrects the excess volume being deposited per mm.",
+        ),
+        "external_perimeter_speed": (
+            lambda v: str(min(int(float(v)) + 5, 60)) if v else None,
+            "Slightly faster outer wall reduces nozzle dwell time and resulting blobbing.",
+        ),
+    },
+
+    "fix_bridging": {
+        "bridge_flow_ratio": (
+            lambda v: f"{max(float(v) - 0.1, 0.7):.2f}" if v else None,
+            "Reduced flow lowers the volume of sagging filament across unsupported spans.",
+        ),
+        "bridge_speed": (
+            lambda v: str(max(int(float(v)) - 10, 15)) if v else None,
+            "Slower bridge speed lets individual strands cool and stiffen before the next pass.",
+        ),
+        "max_fan_speed": (
+            lambda v: "100",
+            "Full fan speed during bridging maximises cooling to solidify strands mid-air.",
+        ),
+    },
+
+    "fix_support_adhesion": {
+        "support_material_contact_distance": (
+            lambda v: f"{max(float(v) - 0.05, 0.05):.2f}" if v else None,
+            "Smaller gap improves support-to-model adhesion, preventing separation mid-print.",
+        ),
+        "support_material_interface_layers": (
+            lambda v: str(min(int(v) + 1, 5)) if v else None,
+            "Extra interface layers create a denser, more stable contact surface between support and model.",
+        ),
+        "support_material_interface_spacing": (
+            lambda v: "0",
+            "Zero spacing creates a solid interface surface, maximising support adhesion.",
+        ),
+    },
+}
+
+# Ordered longest-first so "fix elephant foot" matches before bare "elephant foot".
+_KEYWORD_MAP: list[tuple[str, str]] = [
+    ("better surface quality",    "better_surface_quality"),
+    ("surface quality",           "better_surface_quality"),
+    ("surface finish",            "better_surface_quality"),
+    ("fix layer separation",      "fix_layer_separation"),
+    ("layer separation",          "fix_layer_separation"),
+    ("fix elephant foot",         "fix_elephant_foot"),
+    ("elephant foot",             "fix_elephant_foot"),
+    ("fix under-extrusion",       "fix_under_extrusion"),
+    ("fix under extrusion",       "fix_under_extrusion"),
+    ("under-extrusion",           "fix_under_extrusion"),
+    ("underextrusion",            "fix_under_extrusion"),
+    ("fix over-extrusion",        "fix_over_extrusion"),
+    ("fix over extrusion",        "fix_over_extrusion"),
+    ("over-extrusion",            "fix_over_extrusion"),
+    ("overextrusion",             "fix_over_extrusion"),
+    ("fix support adhesion",      "fix_support_adhesion"),
+    ("support adhesion",          "fix_support_adhesion"),
+    ("fix stringing",             "fix_stringing"),
+    ("stringing",                 "fix_stringing"),
+    ("fix warping",               "fix_warping"),
+    ("warping",                   "fix_warping"),
+    ("fix bridging",              "fix_bridging"),
+    ("bridging",                  "fix_bridging"),
+    ("stronger",                  "stronger"),
+    ("strength",                  "stronger"),
+    ("faster",                    "faster"),
+    ("speed up",                  "faster"),
+]
+
+
+def _detect_goals(text: str) -> list[str]:
+    """Return an ordered, deduplicated list of goal keys matched in *text*."""
+    low = text.lower()
+    seen: set[str] = set()
+    goals: list[str] = []
+    for keyword, goal_key in _KEYWORD_MAP:
+        if keyword in low and goal_key not in seen:
+            seen.add(goal_key)
+            goals.append(goal_key)
+    return goals
 
 
 # ─── ProfileManager ────────────────────────────────────────────────────────────
@@ -300,3 +570,67 @@ class ProfileManager:
         else:
             parts.append("\n(no unusual settings flagged)")
         return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # 6. tune_profile
+    # ------------------------------------------------------------------
+
+    def tune_profile(
+        self,
+        base_profile_name: str,
+        goal_description: str,
+        failure_description: str | None = None,
+    ) -> TuneResult:
+        """Return a TuneResult with proposed changes to reach *goal_description*.
+
+        *failure_description* is parsed for the same set of failure modes and
+        its fixes are merged on top of the goal changes (goals take priority on
+        conflicting keys).  Nothing is written to disk — callers decide whether
+        to pass *new_profile_ini_content* to write_profile().
+        """
+        base = self.read_profile(base_profile_name)
+
+        goals = _detect_goals(goal_description)
+        extra = _detect_goals(failure_description) if failure_description else []
+        # Goals come first; extras fill in additional changes without overriding.
+        all_goals = list(dict.fromkeys(goals + extra))
+
+        proposed_changes: dict[str, str] = {}
+        explanations: dict[str, str] = {}
+
+        for goal_key in all_goals:
+            for setting, (value_fn, explanation) in _TUNE_RULES.get(goal_key, {}).items():
+                if setting in proposed_changes:
+                    continue  # earlier goal already owns this key
+                current = base.get(setting) or _SETTING_DEFAULTS.get(setting)
+                try:
+                    new_val = value_fn(current)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if new_val is None or new_val == base.get(setting):
+                    continue  # no change or skipped
+                proposed_changes[setting] = new_val
+                explanations[setting] = explanation
+
+        # Build merged settings: base overridden by proposed changes.
+        merged = {**base, **proposed_changes}
+
+        # Render .ini content (sectionless format, sorted keys).
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        goal_label = ", ".join(g.replace("_", " ") for g in all_goals)
+        ini_lines = [f"# tuned by ProfileManager on {timestamp} UTC — {goal_label}\n"]
+        for key in sorted(merged):
+            ini_lines.append(f"{key} = {merged[key]}\n")
+        ini_content = "".join(ini_lines)
+
+        # Suggested name: strip trailing " - Copy" variants, append goal labels.
+        base_clean = re.sub(r"\s*-\s*copy\s*$", "", base_profile_name, flags=re.IGNORECASE).strip()
+        suffix = " + ".join(g.replace("_", " ") for g in all_goals)
+        suggested_name = f"{base_clean} - {suffix}"
+
+        return TuneResult(
+            proposed_changes=proposed_changes,
+            explanations=explanations,
+            new_profile_ini_content=ini_content,
+            suggested_profile_name=suggested_name,
+        )
