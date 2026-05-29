@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -10,6 +11,38 @@ from typing import Optional
 
 from prusa.cli import PrusaCLI
 from prusa.tools.profile import ProfileManager
+
+_PRUSA_INI = Path.home() / "Library/Application Support/PrusaSlicer/PrusaSlicer.ini"
+
+
+def _prusa_ini_defaults() -> dict[str, str]:
+    """Return the active preset names from PrusaSlicer.ini (keys: print/filament/printer).
+
+    The names live under the [presets] section, e.g.:
+        [presets]
+        printer = Original Prusa MK4 Input Shaper 0.4 nozzle
+        filament = Generic PLA @PGIS
+        print = 0.20mm QUALITY @MK4 0.4
+    """
+    if not _PRUSA_INI.exists():
+        return {}
+    # PrusaSlicer.ini has bare key=value lines before its first [section], which
+    # configparser rejects.  Prepend a dummy section so it parses cleanly.
+    cp = configparser.RawConfigParser()
+    cp.read_string("[_top]\n" + _PRUSA_INI.read_text(encoding="utf-8", errors="replace"))
+    if not cp.has_section("presets"):
+        return {}
+    return {k: v for k, v in cp["presets"].items() if k in ("print", "filament", "printer")}
+
+
+def _resolve_profile(pm: ProfileManager, name: str | None) -> dict[str, str]:
+    """Try to read *name* from ProfileManager; return empty dict if not found."""
+    if not name:
+        return {}
+    try:
+        return pm.read_profile(name)
+    except KeyError:
+        return {}
 
 # Keys that crash PrusaSlicer 2.9.5 CLI when passed via --load.
 # wipe_tower_extruder=0 causes a SIGSEGV; the rest are meta/relational fields
@@ -202,19 +235,40 @@ class Slicer:
     def slice_file(
         self,
         stl_path: str | Path,
-        profile_name: str,
+        print_profile: str,
+        filament_profile: Optional[str] = None,
+        printer_profile: Optional[str] = None,
         overrides_dict: Optional[dict[str, str]] = None,
     ) -> SliceResult:
-        """Slice *stl_path* using *profile_name* and return parsed stats.
+        """Slice *stl_path* and return parsed stats.
 
-        Optional *overrides_dict* applies per-call setting overrides on top of
-        the named profile before slicing.  Output gcode is placed next to the
-        STL with a .gcode extension.
+        *print_profile* is required.  *filament_profile* and *printer_profile*
+        are optional — when omitted, the active preset from PrusaSlicer.ini is
+        tried; if that's also not found in ProfileManager's sources, that
+        category is simply skipped (no crash, just missing density/cost data).
+
+        Merge order (later wins on key conflicts): printer → print → filament
+        → *overrides_dict*.  This ensures filament temperature and density
+        override any print-profile defaults, consistent with PrusaSlicer's own
+        precedence rules.
+
+        Output gcode is placed next to the STL with a .gcode extension.
         """
         stl_path = Path(stl_path).resolve()
         out_gcode = stl_path.with_suffix(".gcode")
 
-        settings = self._pm.read_profile(profile_name)
+        # Auto-detect unspecified profiles from PrusaSlicer.ini
+        defaults = _prusa_ini_defaults()
+        if filament_profile is None:
+            filament_profile = defaults.get("filament")
+        if printer_profile is None:
+            printer_profile = defaults.get("printer")
+
+        # Merge: printer → print → filament → overrides
+        settings: dict[str, str] = {}
+        settings.update(_resolve_profile(self._pm, printer_profile))
+        settings.update(_resolve_profile(self._pm, print_profile))
+        settings.update(_resolve_profile(self._pm, filament_profile))
         if overrides_dict:
             settings.update(overrides_dict)
 
@@ -251,7 +305,10 @@ class Slicer:
         g = float(g_str)
         if g == 0:
             cm3 = float(stats.get("filament used [cm3]", 0))
-            density = float(stats.get("filament_density", 1.24))
+            # filament_density is 0 in the gcode when no filament profile was loaded;
+            # fall back to 1.24 g/cm³ (typical PLA) so the estimate is still useful.
+            raw_density = float(stats.get("filament_density", 0))
+            density = raw_density if raw_density > 0 else 1.24
             g = cm3 * density
 
         cost = float(stats.get("total filament cost", 0))
