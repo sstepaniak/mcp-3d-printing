@@ -12,6 +12,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.prompts.base import Message
 
+from prusa.tools.printer import ConfigError as PrinterConfigError
+from prusa.tools.printer import PrinterResult, push_to_printer
 from prusa.tools.profile import ProfileManager, TuneResult
 from prusa.tools.slicer import DiagnosticsResult, FixSuggestion, Slicer, SliceResult
 
@@ -289,6 +291,46 @@ def suggest_fixes(diagnostics: dict) -> list[dict]:
     dr = _dict_to_diagnostics(diagnostics)
     fixes = _slicer.suggest_fixes(dr)
     return [dataclasses.asdict(f) for f in fixes]
+
+
+# ─── printer tool ────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def push_gcode_to_printer(
+    gcode_path: str,
+    start_immediately: bool = False,
+) -> dict:
+    """Upload a G-code file to an OctoPrint or Moonraker printer over the network.
+
+    Auto-detects the printer type by probing the host's version endpoints.
+
+    REQUIRED environment variables (must be set before starting the server):
+      PRINTER_HOST     – Full base URL of the printer, e.g.
+                           http://octopi.local
+                           http://192.168.1.42:7125
+      PRINTER_API_KEY  – API key.
+                           OctoPrint:  Settings → API → Application Keys
+                           Moonraker:  see moonraker.conf [authorization] api_key
+
+    Args:
+        gcode_path:        Absolute path to the .gcode file to upload.
+                           Use the output_gcode_path from slice_file.
+        start_immediately: If True, issue the print-start command right after
+                           the upload completes.  Defaults to False so you can
+                           inspect the file on the printer UI first.
+
+    Returns a dict with:
+      printer_type  – 'octoprint' or 'moonraker'
+      upload_url    – canonical URL of the uploaded file on the printer
+      job_id        – filename used as the job reference
+      filename      – bare filename of the uploaded gcode
+      started       – True if the print was started successfully
+
+    Raises ConfigError (shown as tool error) if PRINTER_HOST / PRINTER_API_KEY
+    are missing or the host is unreachable.
+    """
+    result = push_to_printer(gcode_path, start_immediately=start_immediately)
+    return dataclasses.asdict(result)
 
 
 # ─── resource ─────────────────────────────────────────────────────────────────
