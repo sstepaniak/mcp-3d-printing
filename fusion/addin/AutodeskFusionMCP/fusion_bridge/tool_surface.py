@@ -22,6 +22,12 @@ SET_PARAMETER = "set_parameter"
 MEASURE_BODY = "measure_body"
 CHECK_INTERFERENCE = "check_interference"
 LIST_COMPONENTS = "list_components"
+GET_TIMELINE = "get_timeline"
+SUPPRESS_FEATURE = "suppress_feature"
+UNSUPPRESS_FEATURE = "unsuppress_feature"
+ROLLBACK_TO = "rollback_to"
+SAVE_VERSION = "save_version"
+LIST_VERSIONS = "list_versions"
 
 # Resource constants
 RESOURCE_URI = "fusion://design-guide"
@@ -504,6 +510,120 @@ TOOL_DEFINITIONS = [
             "properties": {},
         },
     },
+    # -----------------------------------------------------------------------
+    # History and version tools
+    # -----------------------------------------------------------------------
+    {
+        "name": GET_TIMELINE,
+        "description": (
+            "Return the ordered list of timeline features in the active Fusion 360 design. "
+            "Each entry includes index, name, type (e.g. ExtrudeFeature), is_suppressed, "
+            "and is_rolled_back (True when the feature is beyond the current rollback marker). "
+            "Also returns marker_position (the index of the first rolled-back feature). "
+            "Returns an empty list if the design is in Direct Modelling mode or has no features."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": SUPPRESS_FEATURE,
+        "description": (
+            "Suppress the parametric timeline feature at the given zero-based index. "
+            "Fusion removes the feature from the model computation without deleting it. "
+            "Returns index, name, and suppressed=True. "
+            "Raises a clear error if index is out of range."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": "Zero-based index of the timeline feature to suppress.",
+                },
+            },
+            "required": ["index"],
+        },
+    },
+    {
+        "name": UNSUPPRESS_FEATURE,
+        "description": (
+            "Unsuppress (re-enable) the parametric timeline feature at the given zero-based index. "
+            "Returns index, name, and suppressed=False. "
+            "Raises a clear error if index is out of range."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": "Zero-based index of the timeline feature to unsuppress.",
+                },
+            },
+            "required": ["index"],
+        },
+    },
+    {
+        "name": ROLLBACK_TO,
+        "description": (
+            "Move the timeline rollback marker to the given index (non-destructive). "
+            "After this call, features 0 … index-1 are active; features at index and beyond "
+            "are rolled back (not computed). Pass index equal to the total feature count to "
+            "roll fully forward. "
+            "Returns rolled_back_to_index and the name of the feature at the new boundary."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": (
+                        "Zero-based index where the rollback marker is placed. "
+                        "Features before this index are active; features at or after are rolled back. "
+                        "Use get_timeline first to see valid index values."
+                    ),
+                },
+            },
+            "required": ["index"],
+        },
+    },
+    {
+        "name": SAVE_VERSION,
+        "description": (
+            "Save a named version of the active document. "
+            "Cloud documents: calls Document.save(description) to create a new numbered version; "
+            "returns version_type='cloud' and the version ID. "
+            "Local or unsaved documents: exports a .f3d archive with a datestamped filename "
+            "to ~/Documents (or the system temp directory as fallback); "
+            "returns version_type='local' and the full file path."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Human-readable description attached to the saved version.",
+                },
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "name": LIST_VERSIONS,
+        "description": (
+            "Return saved versions of the active document. "
+            "Cloud documents: enumerates version history via DataFile.versions; "
+            "falls back to current-version info if full history is inaccessible. "
+            "Local or unsaved documents: returns an empty list (local .f3d exports "
+            "have no version index). "
+            "Each entry includes index, name, description, timestamp, version_id, is_latest."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 _TOOL_NAMES = {t["name"] for t in TOOL_DEFINITIONS}
@@ -532,10 +652,16 @@ def build_tool_handlers(
     measure_body,
     check_interference,
     list_components,
+    get_timeline,
+    suppress_feature,
+    unsuppress_feature,
+    rollback_to,
+    save_version,
+    list_versions,
 ):
     """Build a dict mapping tool name to handler function.
 
-    All 21 tool names must have a corresponding handler. A RuntimeError
+    All 27 tool names must have a corresponding handler. A RuntimeError
     is raised if the handler keys don't match TOOL_DEFINITIONS.
     """
     handlers = {
@@ -560,6 +686,12 @@ def build_tool_handlers(
         MEASURE_BODY: measure_body,
         CHECK_INTERFERENCE: check_interference,
         LIST_COMPONENTS: list_components,
+        GET_TIMELINE: get_timeline,
+        SUPPRESS_FEATURE: suppress_feature,
+        UNSUPPRESS_FEATURE: unsuppress_feature,
+        ROLLBACK_TO: rollback_to,
+        SAVE_VERSION: save_version,
+        LIST_VERSIONS: list_versions,
     }
     if set(handlers) != _TOOL_NAMES:
         raise RuntimeError(f"Handler registry mismatch: {set(handlers) ^ _TOOL_NAMES}")

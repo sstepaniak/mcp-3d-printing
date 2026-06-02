@@ -10,6 +10,7 @@ from . import (
     analysis,
     doc_lookup,
     export,
+    history,
     parameters,
     python_exec,
     script_store,
@@ -160,4 +161,10 @@ TOOL_HANDLERS = tool_surface.build_tool_handlers(
     measure_body=_wrap(analysis.measure_body),
     check_interference=_wrap(analysis.check_interference),
     list_components=_wrap(analysis.list_components),
+    get_timeline=_wrap(history.get_timeline),
+    suppress_feature=_wrap(history.suppress_feature),
+    unsuppress_feature=_wrap(history.unsuppress_feature),
+    rollback_to=_wrap(history.rollback_to),
+    save_version=_wrap(history.save_version),
+    list_versions=_wrap(history.list_versions),
 )

@@ -172,6 +172,12 @@ class ToolSurfaceTests(unittest.TestCase):
         "measure_body",
         "check_interference",
         "list_components",
+        "get_timeline",
+        "suppress_feature",
+        "unsuppress_feature",
+        "rollback_to",
+        "save_version",
+        "list_versions",
     }
 
     def test_all_expected_tools_present(self):
