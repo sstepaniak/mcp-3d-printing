@@ -16,6 +16,12 @@ EXPORT_STL = "export_stl"
 EXPORT_STEP = "export_step"
 EXPORT_3MF = "export_3mf"
 EXPORT_DXF = "export_dxf"
+LIST_PARAMETERS = "list_parameters"
+GET_PARAMETER = "get_parameter"
+SET_PARAMETER = "set_parameter"
+MEASURE_BODY = "measure_body"
+CHECK_INTERFERENCE = "check_interference"
+LIST_COMPONENTS = "list_components"
 
 # Resource constants
 RESOURCE_URI = "fusion://design-guide"
@@ -370,6 +376,134 @@ TOOL_DEFINITIONS = [
             "required": ["sketch_name"],
         },
     },
+    # -----------------------------------------------------------------------
+    # Parameter tools
+    # -----------------------------------------------------------------------
+    {
+        "name": LIST_PARAMETERS,
+        "description": (
+            "Return all user parameters in the active Fusion 360 design. "
+            "Each parameter includes name, expression (e.g. '5 mm'), raw value "
+            "(Fusion internal units: cm for lengths, rad for angles), unit string, "
+            "and comment. Returns an empty list if no user parameters exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": GET_PARAMETER,
+        "description": (
+            "Return full details for one named user parameter. "
+            "Raises a clear error with available names if the parameter is not found."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact name of the user parameter to retrieve.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": SET_PARAMETER,
+        "description": (
+            "Modify a user parameter value and trigger a model update. "
+            "The value is treated as being in the parameter's current unit (or the "
+            "explicitly provided unit). Fusion evaluates the expression and propagates "
+            "the change through the parametric timeline. "
+            "Returns name, old_value, new_value, unit, old_expression, new_expression."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the user parameter to modify.",
+                },
+                "value": {
+                    "type": "number",
+                    "description": (
+                        "New numeric value in the parameter's current unit "
+                        "(or the unit specified by the unit field)."
+                    ),
+                },
+                "unit": {
+                    "type": "string",
+                    "description": (
+                        "Unit override for the new value (e.g. 'mm', 'in', 'deg'). "
+                        "Defaults to the parameter's existing unit when omitted."
+                    ),
+                },
+            },
+            "required": ["name", "value"],
+        },
+    },
+    # -----------------------------------------------------------------------
+    # Analysis tools
+    # -----------------------------------------------------------------------
+    {
+        "name": MEASURE_BODY,
+        "description": (
+            "Return physical measurements for a named body (or the first solid visible body "
+            "if body_name is omitted). "
+            "Returns: volume_mm3, surface_area_mm2, bounding_box_mm (x/y/z extents), "
+            "center_of_mass_mm (x/y/z). All values are in millimetres or mm³/mm²."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "body_name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the BRepBody to measure. "
+                        "Searched in root component then all sub-components. "
+                        "Omit to measure the first solid visible body."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": CHECK_INTERFERENCE,
+        "description": (
+            "Check whether two named components physically interfere (overlap). "
+            "Returns interferes (bool) and interference_volume_mm3 (summed volume of "
+            "all overlapping regions in mm³, or null if none or not computable)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component_a": {
+                    "type": "string",
+                    "description": "Name of the first component to check.",
+                },
+                "component_b": {
+                    "type": "string",
+                    "description": "Name of the second component to check.",
+                },
+            },
+            "required": ["component_a", "component_b"],
+        },
+    },
+    {
+        "name": LIST_COMPONENTS,
+        "description": (
+            "Return a flat tree of all components and bodies in the active Fusion 360 design. "
+            "Each entry has: name, type ('component' or 'body'), parent (component name or null "
+            "for the root), is_visible, and for bodies also is_solid. "
+            "Useful for discovering what bodies and components are available before calling "
+            "other tools."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 _TOOL_NAMES = {t["name"] for t in TOOL_DEFINITIONS}
@@ -392,10 +526,16 @@ def build_tool_handlers(
     export_step,
     export_3mf,
     export_dxf,
+    list_parameters,
+    get_parameter,
+    set_parameter,
+    measure_body,
+    check_interference,
+    list_components,
 ):
     """Build a dict mapping tool name to handler function.
 
-    All 15 tool names must have a corresponding handler. A RuntimeError
+    All 21 tool names must have a corresponding handler. A RuntimeError
     is raised if the handler keys don't match TOOL_DEFINITIONS.
     """
     handlers = {
@@ -414,6 +554,12 @@ def build_tool_handlers(
         EXPORT_STEP: export_step,
         EXPORT_3MF: export_3mf,
         EXPORT_DXF: export_dxf,
+        LIST_PARAMETERS: list_parameters,
+        GET_PARAMETER: get_parameter,
+        SET_PARAMETER: set_parameter,
+        MEASURE_BODY: measure_body,
+        CHECK_INTERFERENCE: check_interference,
+        LIST_COMPONENTS: list_components,
     }
     if set(handlers) != _TOOL_NAMES:
         raise RuntimeError(f"Handler registry mismatch: {set(handlers) ^ _TOOL_NAMES}")

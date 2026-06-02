@@ -7,8 +7,10 @@ import traceback
 import adsk.core
 
 from . import (
+    analysis,
     doc_lookup,
     export,
+    parameters,
     python_exec,
     script_store,
     selection,
@@ -152,4 +154,10 @@ TOOL_HANDLERS = tool_surface.build_tool_handlers(
     export_step=_wrap(export.export_step),
     export_3mf=_wrap(export.export_3mf),
     export_dxf=_wrap(export.export_dxf),
+    list_parameters=_wrap(parameters.list_parameters),
+    get_parameter=_wrap(parameters.get_parameter),
+    set_parameter=_wrap(parameters.set_parameter),
+    measure_body=_wrap(analysis.measure_body),
+    check_interference=_wrap(analysis.check_interference),
+    list_components=_wrap(analysis.list_components),
 )

@@ -166,6 +166,12 @@ class ToolSurfaceTests(unittest.TestCase):
         "export_step",
         "export_3mf",
         "export_dxf",
+        "list_parameters",
+        "get_parameter",
+        "set_parameter",
+        "measure_body",
+        "check_interference",
+        "list_components",
     }
 
     def test_all_expected_tools_present(self):
